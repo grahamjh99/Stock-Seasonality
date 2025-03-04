@@ -1,0 +1,13 @@
+# Ignore Anaconda Projects folder
+AnacondaProjects/
+
+# Ignore Jupyter Notebook checkpoints
+**/.ipynb_checkpoints/
+
+# Ignore VS Code settings
+.vscode/
+
+.virtual_documents/
+
+# Ignore Data folder
+Data/
