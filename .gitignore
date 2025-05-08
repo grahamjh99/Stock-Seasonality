@@ -8,6 +8,7 @@ AnacondaProjects/
 # Ignore Jupyter Notebook checkpoints
 **/.ipynb_checkpoints/
 
+
 # Ignore VS Code settings
 .vscode/
 
@@ -15,3 +16,6 @@ AnacondaProjects/
 
 # Ignore Data folder
 Data/
+
+# Ignore venv folder from cursor desktop app
+venv/
