@@ -1,6 +1,6 @@
 aplhavantage_api_key.env
 apilayer_key.env
-
+.env
 
 # Ignore Anaconda Projects folder
 AnacondaProjects/
