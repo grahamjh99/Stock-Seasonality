@@ -26,7 +26,7 @@ from pandas.tseries.offsets import BDay
 # Configuration & helpers
 ###############################################################################
 
-load_dotenv("alphavantage_api_key.env")
+load_dotenv("aplhavantage_api_key.env")
 API_KEY = os.getenv("key")
 BASE_URL = "https://www.alphavantage.co/query"
 
@@ -43,7 +43,7 @@ LABEL_MAP = {
 def get_daily_prices(symbol: str, full: bool = False) -> pd.DataFrame:
     """Pull TIME_SERIES_DAILY_ADJUSTED and return an OHLCV dataframe (newest first)."""
     params = {
-        "function": "TIME_SERIES_DAILY_ADJUSTED",
+        "function": "TIME_SERIES_DAILY",
         "symbol": symbol.upper(),
         "apikey": API_KEY,
         "outputsize": "full" if full else "compact",
@@ -63,7 +63,7 @@ def get_daily_prices(symbol: str, full: bool = False) -> pd.DataFrame:
             "2. high": "high",
             "3. low": "low",
             "4. close": "close",
-            "6. volume": "volume",
+            "5. volume": "volume",
         }
     )[["open", "high", "low", "close", "volume"]]
     ts["volume"] = ts["volume"].astype(float)
@@ -82,16 +82,17 @@ def get_news_sentiment(symbol: str, page_size: int = 200) -> pd.DataFrame:
     r = requests.get(BASE_URL, params=params, timeout=30)
     r.raise_for_status()
     data = r.json()
-    if "feed" not in data:
-        # No news = return empty df
-        return pd.DataFrame(columns=[
-            "date",
+    if "feed" not in data or not data["feed"]:
+        # No news = return empty DataFrame with expected structure
+        index = pd.date_range(end=pd.Timestamp.today(), periods=30, freq="B")
+        empty = pd.DataFrame(0.0, index=index, columns=[
             "overall_sentiment_score",
             "overall_sentiment_label",
             "ticker_relevance_score",
             "ticker_sentiment_score",
             "ticker_sentiment_label",
-        ]).set_index("date")
+        ])
+        return empty
 
     rows = []
     for item in data["feed"]:
