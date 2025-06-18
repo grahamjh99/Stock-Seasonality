@@ -30,15 +30,6 @@ load_dotenv("aplhavantage_api_key.env")
 API_KEY = os.getenv("key")
 BASE_URL = "https://www.alphavantage.co/query"
 
-# Sentiment‑label mapping used during training
-LABEL_MAP = {
-    "Somewhat-Bullish": 4,
-    "Neutral": 3,
-    "Bullish": 5,
-    "Somewhat-Bearish": 2,
-    "Bearish": 1,
-}
-
 @st.cache_data(show_spinner=False, ttl=60 * 60)
 def get_daily_prices(symbol: str, full: bool = False) -> pd.DataFrame:
     """Pull TIME_SERIES_DAILY_ADJUSTED and return an OHLCV dataframe (newest first)."""
@@ -82,51 +73,53 @@ def get_news_sentiment(symbol: str, page_size: int = 200) -> pd.DataFrame:
     r = requests.get(BASE_URL, params=params, timeout=30)
     r.raise_for_status()
     data = r.json()
-    if "feed" not in data or not data["feed"]:
-        # No news = return empty DataFrame with expected structure
-        index = pd.date_range(end=pd.Timestamp.today(), periods=30, freq="B")
-        empty = pd.DataFrame(0.0, index=index, columns=[
-            "overall_sentiment_score",
-            "overall_sentiment_label",
-            "ticker_relevance_score",
-            "ticker_sentiment_score",
-            "ticker_sentiment_label",
-        ])
-        return empty
 
-    rows = []
-    for item in data["feed"]:
-        date = pd.to_datetime(item["time_published"]).date()
-        overall_score = float(item["overall_sentiment_score"])
-        overall_label = LABEL_MAP.get(item["overall_sentiment_label"], 3)
-        # Each item might cover multiple tickers; find the entry for our symbol
-        ticker_row = next((t for t in item["ticker_sentiment"] if t["ticker"] == symbol.upper()), None)
-        if ticker_row:
-            tick_rel = float(ticker_row["ticker_relevance_score"])
-            tick_score = float(ticker_row["ticker_sentiment_score"])
-            tick_label = LABEL_MAP.get(ticker_row["ticker_sentiment_label"], 3)
-        else:
-            tick_rel = tick_score = 0.0
-            tick_label = 3
-        rows.append(
-            {
-                "date": date,
-                "overall_sentiment_score": overall_score,
-                "overall_sentiment_label": overall_label,
-                "ticker_relevance_score": tick_rel,
-                "ticker_sentiment_score": tick_score,
-                "ticker_sentiment_label": tick_label,
-            }
-        )
+    feed_items = data['feed']
+    flat_data = []
 
-    df = pd.DataFrame(rows)
-    # Aggregate by date (mean of scores / labels)
-    df = (
-        df.groupby("date").mean(numeric_only=True)
-        .sort_index()
-        .rename_axis(index="date")
-    )
+    for article in feed_items:
+        base = {
+            'title': article.get('title'),
+            'time_published': article.get('time_published'),
+            'authors': ", ".join(article.get('authors', [])),
+            'summary': article.get('summary'),
+            'source': article.get('source'),
+            'overall_sentiment_score': article.get('overall_sentiment_score'),
+            'overall_sentiment_label': article.get('overall_sentiment_label'),
+        }
+
+        # Topics as comma-separated string
+        topics = article.get('topics', [])
+        topic_names = [t['topic'] for t in topics]
+        base['topics'] = ", ".join(topic_names)
+
+        # Ticker sentiment - multiple tickers possible
+        for ticker_info in article.get('ticker_sentiment', []):
+            if ticker_info.get('ticker') == symbol.upper():
+                flat_row = base.copy()
+                flat_row['ticker'] = ticker_info.get('ticker')
+                flat_row['ticker_relevance_score'] = ticker_info.get('relevance_score')
+                flat_row['ticker_sentiment_score'] = ticker_info.get('ticker_sentiment_score')
+                flat_row['ticker_sentiment_label'] = ticker_info.get('ticker_sentiment_label')
+                flat_data.append(flat_row)
+                break  # Only keep data for this symbol
+
+    df = pd.DataFrame(flat_data)
+    df['time_published'] = pd.to_datetime(df['time_published'].str[:8], format='%Y%m%d')
+    df = df.set_index('time_published')
+
+    label_map = {
+        'Somewhat-Bullish': 4, 
+        'Neutral': 3, 
+        'Bullish': 5, 
+        'Somewhat-Bearish': 2,
+        'Bearish': 1
+    }
+    df['overall_sentiment_label'] = df['overall_sentiment_label'].map(label_map)
+    df['ticker_sentiment_label'] = df['ticker_sentiment_label'].map(label_map)
+
     return df
+
 
 ###############################################################################
 # Feature engineering (match training pipeline)
@@ -134,23 +127,9 @@ def get_news_sentiment(symbol: str, page_size: int = 200) -> pd.DataFrame:
 
 def build_feature_df(price_df: pd.DataFrame, sent_df: pd.DataFrame) -> pd.DataFrame:
     """Merge OHLCV with sentiment and ensure column order matches training."""
-    # Align on business days of price_df (sentiment may be sparse)
-    sent_df = sent_df.reindex(price_df.index, method="ffill")
-    feat = pd.concat([price_df, sent_df], axis=1)
-    feat = feat.fillna(0.0)  # fill sentiment gaps with neutral/zero
-    feat = feat[[
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "overall_sentiment_score",
-        "overall_sentiment_label",
-        "ticker_relevance_score",
-        "ticker_sentiment_score",
-        "ticker_sentiment_label",
-    ]]
-    return feat.astype(float)
+    merged_df = price_df.merge(sent_df,how = 'left',left_index = True, right_index = True)
+    merged_df = merged_df.fillna(0)
+    return merged_df.astype(float)
 
 ###############################################################################
 # Load trained models
