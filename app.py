@@ -21,6 +21,7 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 from pandas.tseries.offsets import BDay
+from sklearn.ensemble import RandomForestRegressor
 
 ###############################################################################
 # Configuration & helpers
@@ -126,8 +127,9 @@ def get_news_sentiment(symbol: str, page_size: int = 200) -> pd.DataFrame:
 ###############################################################################
 
 def build_feature_df(price_df: pd.DataFrame, sent_df: pd.DataFrame) -> pd.DataFrame:
-    """Merge OHLCV with sentiment and ensure column order matches training."""
+    """Merge stock prices with sentiment and ensure column order matches training."""
     merged_df = price_df.merge(sent_df,how = 'left',left_index = True, right_index = True)
+    merged_df = merged_df.drop(columns = ['title','topics','ticker','authors','summary','source'])
     merged_df = merged_df.fillna(0)
     return merged_df.astype(float)
 
@@ -135,14 +137,38 @@ def build_feature_df(price_df: pd.DataFrame, sent_df: pd.DataFrame) -> pd.DataFr
 # Load trained models
 ###############################################################################
 
-MODEL_1_PATH = Path("models/best_rf_model-1-day_1.pkl")  # t+1
-MODEL_7_PATH = Path("models/best_rf_model.pkl")  # t+7
+model_1_path = Path("models/best_rf_model-1-day_1.pkl")  # t+1
+model_7_path = Path("models/best_rf_model.pkl")  # t+7
 
-if not MODEL_1_PATH.exists() or not MODEL_7_PATH.exists():
-    st.stop()
+# Extract parameters
+pipeline_1 = joblib.load(model_1_path)
+pipeline_7 = joblib.load(model_7_path)
 
-model_1 = joblib.load(MODEL_1_PATH)
-model_7 = joblib.load(MODEL_7_PATH)
+rf_1 = pipeline_1.named_steps["rf"]
+rf_7 = pipeline_7.named_steps["rf"]
+
+model_1_params = rf_1.get_params()
+model_7_params = rf_7.get_params()
+
+@st.cache_resource
+def train_models_for_symbol(symbol, _params_t1, _params_t7):
+    prices = get_daily_prices(symbol)
+    news = get_news_sentiment(symbol)
+    features = build_feature_df(prices, news)
+
+    # Targets
+    target_t1 = prices["close"].shift(-1).dropna()
+    target_t7 = prices["close"].shift(-7).dropna()
+
+    # Align features to target lengths
+    features_t1 = features.iloc[: len(target_t1)]
+    features_t7 = features.iloc[: len(target_t7)]
+
+    # Train models
+    model_t1 = RandomForestRegressor(**_params_t1).fit(features_t1, target_t1)
+    model_t7 = RandomForestRegressor(**_params_t7).fit(features_t7, target_t7)
+
+    return model_t1, model_t7, prices, features
 
 ###############################################################################
 # Streamlit UI
@@ -150,49 +176,42 @@ model_7 = joblib.load(MODEL_7_PATH)
 
 st.title("📈 Stock Price Forecast (1‑day & 7‑day)")
 
-symbol = st.text_input("Enter a stock ticker (e.g., MSFT)", value="MSFT").upper().strip()
+symbol = st.text_input("Enter a stock ticker (e.g., MSFT)", placeholder="MSFT").upper().strip()
 
 if symbol:
     try:
-        with st.spinner("Fetching data…"):
-            prices = get_daily_prices(symbol, full=False)
-            news = get_news_sentiment(symbol)
-            features = build_feature_df(prices, news)
+        with st.spinner("Fetching & training models…"):
+            model_1, model_7, prices, features = train_models_for_symbol(symbol, model_1_params, model_7_params)
     except Exception as e:
-        st.error(f"Error fetching data: {e}")
+        st.error(f"Error: {e}")
         st.stop()
 
-    # Split features into in‑sample (for plotting) and the latest row (for forward forecasts)
+    # Split features
     X_all = features.copy()
     X_latest = X_all.tail(1)
 
-    # 1‑day ahead predictions for historical plot
-    pred1_all = pd.Series(model_1.predict(X_all), index=X_all.index).shift(1)
-    # Remove last NaN after shift
-    pred1_all = pred1_all[:-1]
+    # t+1 predictions
+    pred1_all = pd.Series(model_1.predict(X_all), index=X_all.index).shift(1)[:-1]
 
-    # 7‑day ahead
+    # t+7 predictions
     pred7_all_raw = model_7.predict(X_all)
     pred7_dates = X_all.index + BDay(7)
     pred7_all = pd.Series(pred7_all_raw, index=pred7_dates)
-    # Keep only those within price_df range for plotting comparison
     pred7_hist = pred7_all[pred7_all.index <= prices.index.max()]
 
-    # Forward forecasts (tomorrow & 7‑day future point)
+    # Forecast points
     tomorrow_date = prices.index.max() + BDay(1)
     next7_date = prices.index.max() + BDay(7)
 
     tomorrow_pred = float(model_1.predict(X_latest))
     next7_pred = float(model_7.predict(X_latest))
 
-    # ------------------ Plot ------------------
+    # Plot
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=prices.index, y=prices["close"], name="Actual Close"))
     fig.add_trace(go.Scatter(x=pred1_all.index, y=pred1_all, name="Predicted Close (t+1)", line=dict(dash="dot")))
-    # Historical t+7 (optional)
     if not pred7_hist.empty:
         fig.add_trace(go.Scatter(x=pred7_hist.index, y=pred7_hist, name="Predicted Close (t+7 hist)", line=dict(dash="dash")))
-    # Future 7‑day forecast point
     fig.add_trace(
         go.Scatter(
             x=[next7_date],
@@ -213,9 +232,9 @@ if symbol:
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # ------------------ Forecast metrics ------------------
+    # Forecast metrics
     col1, col2 = st.columns(2)
     col1.metric(label=f"Predicted close for {tomorrow_date.date()}", value=f"${tomorrow_pred:,.2f}")
     col2.metric(label=f"Predicted close for {next7_date.date()}", value=f"${next7_pred:,.2f}")
 
-    st.caption("Models: Random Forest (scaled) trained on OHLCV + Alpha Vantage news sentiment.  •  Weekends automatically skipped using business‑day offsets.")
+    st.caption("Models: Random Forest (retrained per stock) using Alpha Vantage stock price and news sentiment.  •  Weekends skipped with business-day offsets.")
