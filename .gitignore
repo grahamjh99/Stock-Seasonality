@@ -18,4 +18,4 @@ AnacondaProjects/
 Data/
 
 # Ignore venv folder from cursor desktop app
-venv/
+venv/*
